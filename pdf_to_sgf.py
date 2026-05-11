@@ -73,6 +73,9 @@ class BoardScanner:
         ocr_moves = {}
 
         for sx, sy, sr in detected_stones:
+            sx = int(sx)
+            sy = int(sy)
+            sr = int(sr)
             if not grid_x or not grid_y: continue
             gx = min(range(19), key=lambda i: abs(grid_x[i] - sx))
             gy = min(range(19), key=lambda i: abs(grid_y[i] - sy))
@@ -127,8 +130,8 @@ class PDFExtractor:
 
     def extract_all(self):
         problems = {}
-        problem_re = re.compile(r"Problem\s+(\d+)\.\s+(Black|White)\s+to\s+play")
-        answer_re = re.compile(r"Problem\s+(\d+):\s+(.*)")
+        problem_re = re.compile(r"Problem\s+(\d+)\.\s+(Black|White)\s+to\s+play", re.IGNORECASE)
+        answer_re = re.compile(r"Problem\s+(\d+):\s+(.*)", re.IGNORECASE)
 
         for page_num in range(len(self.doc)):
             page = self.doc[page_num]
@@ -161,25 +164,31 @@ class PDFExtractor:
             for tb in text_blocks:
                 text = tb["text"]
 
-                m_prob = problem_re.search(text)
-                if m_prob:
-                    prob_num = int(m_prob.group(1))
-                    turn = m_prob.group(2)
-                    if prob_num not in problems:
-                        problems[prob_num] = {"turn": turn, "text": text, "initial_image": None, "answers": []}
-                    cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
-                    if cands: problems[prob_num]["initial_image"] = sorted(cands, key=lambda c: c[0])[0][1]["image"]
+                m_probs = list(problem_re.finditer(text))
+                if m_probs:
+                    for i, m_prob in enumerate(m_probs):
+                        prob_num = int(m_prob.group(1))
+                        turn = m_prob.group(2)
+                        if prob_num not in problems:
+                            problems[prob_num] = {"turn": turn, "text": m_prob.group(0), "initial_image": None, "answers": []}
 
-                m_ans = answer_re.search(text)
-                if m_ans:
-                    prob_num = int(m_ans.group(1))
-                    ans_title = m_ans.group(2)
-                    if prob_num in problems:
-                        cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
-                        if cands:
-                            b = sorted(cands, key=lambda c: c[0])[0][1]
-                            if b["is_full"]:
-                                problems[prob_num]["answers"].append({"title": ans_title, "text": text, "image": b["image"]})
+                        cands = [b for b in boards if b["y"] > tb["y0"]-50 and b["y"] < tb["y0"] + 1500]
+                        cands.sort(key=lambda b: (b["y"], b["x"]))
+                        if len(cands) > i:
+                            problems[prob_num]["initial_image"] = cands[i]["image"]
+
+                m_anses = list(answer_re.finditer(text))
+                if m_anses:
+                    for i, m_ans in enumerate(m_anses):
+                        prob_num = int(m_ans.group(1))
+                        ans_title = m_ans.group(2)
+                        if prob_num in problems:
+                            # Answers might also be grouped in one text block
+                            cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
+                            if cands:
+                                b = sorted(cands, key=lambda c: c[0])[0][1]
+                                if b["is_full"]:
+                                    problems[prob_num]["answers"].append({"title": ans_title, "text": m_ans.group(0), "image": b["image"]})
 
         return problems
 
@@ -246,12 +255,17 @@ def main():
     writer = SGFWriter()
 
     for p, data in problems.items():
-        if data['initial_image'] is not None and data['answers']:
+        if data['initial_image'] is not None:
             print(f"Generating SGF for Problem {p}...")
-            sgf = writer.create_sgf(data, extractor.scanner)
-            with open(f"output_sgf/Problem_{p}.sgf", "w") as f:
-                f.write(sgf)
-            print(f"Saved output_sgf/Problem_{p}.sgf")
+            try:
+                sgf = writer.create_sgf(data, extractor.scanner)
+                with open(f"output_sgf/Problem_{p}.sgf", "w") as f:
+                    f.write(sgf)
+                print(f"Saved output_sgf/Problem_{p}.sgf")
+            except Exception as e:
+                print(f"Failed to generate SGF for Problem {p}: {e}")
+        else:
+            print(f"Skipping Problem {p}: Initial board not found.")
 
 if __name__ == "__main__":
     main()
