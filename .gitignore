@@ -1,0 +1,9 @@
+*.png
+*.jpg
+*.jpeg
+__pycache__/
+*.pyc
+run.log
+run.pid
+stone_crops/
+output_sgf/
