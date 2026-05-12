@@ -12,8 +12,8 @@ class BoardScanner:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         line_mask = gray.copy()
-        for x, y, r in detected_stones:
-            cv2.circle(line_mask, (x, y), r+2, 255, -1)
+        for stone in detected_stones:
+            cv2.circle(line_mask, (int(stone[0]), int(stone[1])), int(stone[2])+2, 255, -1)
 
         edges = cv2.Canny(line_mask, 50, 150, apertureSize=3)
         lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=80, minLineLength=50, maxLineGap=10)
@@ -45,11 +45,7 @@ class BoardScanner:
                 step = (image_size - 2*margin) / 18.0
                 return [margin + i*step for i in range(19)]
             min_c, max_c = centers[0], centers[-1]
-            diffs = np.diff(centers)
-            median_space = np.median(diffs) if len(diffs) > 0 else 30
-            num_gaps = int(round((max_c - min_c) / median_space)) if median_space > 0 else 18
-            if num_gaps == 0: num_gaps = 18
-            step = (max_c - min_c) / num_gaps
+            step = (max_c - min_c) / 18.0
             return [min_c + i*step for i in range(19)]
 
         return fit_grid(v_centers, image.shape[1]), fit_grid(h_centers, image.shape[0])
@@ -64,7 +60,7 @@ class BoardScanner:
         detected_stones = []
         if circles is not None:
             for i in np.uint16(np.around(circles))[0, :]:
-                detected_stones.append((i[0], i[1], i[2]))
+                detected_stones.append([i[0], i[1], i[2], None])
 
         grid_x, grid_y = self.get_grid(image, detected_stones)
 
@@ -72,7 +68,8 @@ class BoardScanner:
         white_stones = set()
         ocr_moves = {}
 
-        for sx, sy, sr in detected_stones:
+        for idx, stone in enumerate(detected_stones):
+            sx, sy, sr = int(stone[0]), int(stone[1]), int(stone[2])
             if not grid_x or not grid_y: continue
             gx = min(range(19), key=lambda i: abs(grid_x[i] - sx))
             gy = min(range(19), key=lambda i: abs(grid_y[i] - sy))
@@ -81,7 +78,7 @@ class BoardScanner:
             if roi.size == 0: continue
 
             mask = np.zeros(roi.shape, dtype=np.uint8)
-            cv2.circle(mask, (sr, sr), sr-2, 255, -1)
+            cv2.circle(mask, (roi.shape[1]//2, roi.shape[0]//2), max(1, sr-2), 255, -1)
             mean_val = cv2.mean(roi, mask=mask)[0]
             is_black = mean_val < 128
 
@@ -109,6 +106,8 @@ class BoardScanner:
 
             if number:
                 ocr_moves[number] = ('B' if is_black else 'W', (gx, gy))
+
+            # Instead of mutating the original sequence (we used tuples earlier), let's just make sure `black_stones` is right
             if is_black:
                 black_stones.add((gx, gy))
             else:
@@ -127,8 +126,8 @@ class PDFExtractor:
 
     def extract_all(self):
         problems = {}
-        problem_re = re.compile(r"Problem\s+(\d+)\.\s+(Black|White)\s+to\s+play")
-        answer_re = re.compile(r"Problem\s+(\d+):\s+(.*)")
+        problem_re = re.compile(r"Problem\s+(\d+)\.\s+(Black|White)\s+to\s+play", re.IGNORECASE)
+        answer_re = re.compile(r"Problem\s+(\d+):\s+(.*)", re.IGNORECASE)
 
         for page_num in range(len(self.doc)):
             page = self.doc[page_num]
@@ -161,25 +160,31 @@ class PDFExtractor:
             for tb in text_blocks:
                 text = tb["text"]
 
-                m_prob = problem_re.search(text)
-                if m_prob:
-                    prob_num = int(m_prob.group(1))
-                    turn = m_prob.group(2)
-                    if prob_num not in problems:
-                        problems[prob_num] = {"turn": turn, "text": text, "initial_image": None, "answers": []}
-                    cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
-                    if cands: problems[prob_num]["initial_image"] = sorted(cands, key=lambda c: c[0])[0][1]["image"]
+                m_probs = list(problem_re.finditer(text))
+                if m_probs:
+                    for i, m_prob in enumerate(m_probs):
+                        prob_num = int(m_prob.group(1))
+                        turn = m_prob.group(2)
+                        if prob_num not in problems:
+                            problems[prob_num] = {"turn": turn, "text": m_prob.group(0), "initial_image": None, "answers": []}
 
-                m_ans = answer_re.search(text)
-                if m_ans:
-                    prob_num = int(m_ans.group(1))
-                    ans_title = m_ans.group(2)
-                    if prob_num in problems:
-                        cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
-                        if cands:
-                            b = sorted(cands, key=lambda c: c[0])[0][1]
-                            if b["is_full"]:
-                                problems[prob_num]["answers"].append({"title": ans_title, "text": text, "image": b["image"]})
+                        cands = [b for b in boards if b["y"] > tb["y0"]-50 and b["y"] < tb["y0"] + 1500]
+                        cands.sort(key=lambda b: (b["y"], b["x"]))
+                        if len(cands) > i:
+                            problems[prob_num]["initial_image"] = cands[i]["image"]
+
+                m_anses = list(answer_re.finditer(text))
+                if m_anses:
+                    for i, m_ans in enumerate(m_anses):
+                        prob_num = int(m_ans.group(1))
+                        ans_title = m_ans.group(2)
+                        if prob_num in problems:
+                            # Answers might also be grouped in one text block
+                            cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
+                            if cands:
+                                b = sorted(cands, key=lambda c: c[0])[0][1]
+                                if b["is_full"]:
+                                    problems[prob_num]["answers"].append({"title": ans_title, "text": m_ans.group(0), "image": b["image"]})
 
         return problems
 
@@ -210,19 +215,45 @@ class SGFWriter:
             new_stones = ans_stones - init_stones
 
             moves = ans_scan['ocr']
-            found_coords = {v[1] for v in moves.values()}
-            missing_stones = [s for s in new_stones if s[1] not in found_coords]
 
-            # Simple heuristic: try to fill in gaps in move sequence
-            expected_moves = len(moves) + len(missing_stones)
-            for num in range(1, expected_moves + 1):
-                if num not in moves and missing_stones:
-                    s = missing_stones.pop()
-                    moves[num] = s
+            # Filter hallucinations
+            moves_to_delete = []
+            for num, move in moves.items():
+                if move not in new_stones:
+                    moves_to_delete.append(num)
+            for num in moves_to_delete:
+                del moves[num]
+
+            found_coords = {v[1] for v in moves.values()}
+            missing_stones = list({s for s in new_stones if s[1] not in found_coords})
+
+            current_color = 'B' if problem_data['turn'] == 'Black' else 'W'
+            final_moves = {}
+            total_moves = len(new_stones)
+
+            # Sort missing stones simply to make them deterministic
+            missing_stones.sort(key=lambda s: s[1][1])
+
+            for num in range(1, total_moves + 1):
+                expected_color = 'B' if (num % 2 == 1 and current_color == 'B') or (num % 2 == 0 and current_color == 'W') else 'W'
+
+                if num in moves and moves[num][0] == expected_color:
+                    final_moves[num] = moves[num]
+                elif num in moves:
+                    # OCR was confident, maybe the color check was wrong. Still enforce the sequence's expected color to ensure alternating sequence!
+                    final_moves[num] = (expected_color, moves[num][1])
+                else:
+                    matching = [s for s in missing_stones if s[0] == expected_color]
+                    if matching:
+                        final_moves[num] = matching[0]
+                        missing_stones.remove(matching[0])
+                    elif missing_stones:
+                        s = missing_stones.pop(0)
+                        final_moves[num] = (expected_color, s[1])
 
             sgf += "\n("
             first_move = True
-            for move_num, (color, (x, y)) in sorted(moves.items()):
+            for move_num, (color, (x, y)) in sorted(final_moves.items()):
                 sgf += f";{color}[{self.coord_to_sgf(x, y)}]"
                 if first_move:
                     sgf += f"C[{ans['text']}]"
@@ -246,12 +277,17 @@ def main():
     writer = SGFWriter()
 
     for p, data in problems.items():
-        if data['initial_image'] is not None and data['answers']:
+        if data['initial_image'] is not None:
             print(f"Generating SGF for Problem {p}...")
-            sgf = writer.create_sgf(data, extractor.scanner)
-            with open(f"output_sgf/Problem_{p}.sgf", "w") as f:
-                f.write(sgf)
-            print(f"Saved output_sgf/Problem_{p}.sgf")
+            try:
+                sgf = writer.create_sgf(data, extractor.scanner)
+                with open(f"output_sgf/Problem_{p}.sgf", "w") as f:
+                    f.write(sgf)
+                print(f"Saved output_sgf/Problem_{p}.sgf")
+            except Exception as e:
+                print(f"Failed to generate SGF for Problem {p}: {e}")
+        else:
+            print(f"Skipping Problem {p}: Initial board not found.")
 
 if __name__ == "__main__":
     main()
