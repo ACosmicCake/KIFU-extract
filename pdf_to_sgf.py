@@ -160,6 +160,21 @@ class PDFExtractor:
             for tb in text_blocks:
                 text = tb["text"]
 
+                # Find the best board for this text block
+                # A board is valid if it is BELOW the text (y > y0 - margin)
+                # AND horizontally overlaps with the text block.
+                # Since columns are roughly left/right, checking if abs(board_x - text_x) < width/3 is a good heuristic.
+                best_board = None
+                min_dy = float('inf')
+
+                for b in boards:
+                    dy = b["y"] - tb["y0"]
+                    dx = abs(b["x"] - tb["x0"])
+                    if dy > -50 and dx < cv_img.shape[1] * 0.4:
+                        if dy < min_dy:
+                            min_dy = dy
+                            best_board = b
+
                 m_probs = list(problem_re.finditer(text))
                 if m_probs:
                     for i, m_prob in enumerate(m_probs):
@@ -168,9 +183,16 @@ class PDFExtractor:
                         if prob_num not in problems:
                             problems[prob_num] = {"turn": turn, "text": m_prob.group(0), "initial_image": None, "answers": []}
 
-                        cands = [b for b in boards if b["y"] > tb["y0"]-50 and b["y"] < tb["y0"] + 1500]
-                        cands.sort(key=lambda b: (b["y"], b["x"]))
-                        if len(cands) > i:
+                        # A text block typically resides in a column. Find the board directly beneath it in the same column.
+                        cands = [b for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"] - tb["x0"]) < cv_img.shape[1]/3]
+                        cands.sort(key=lambda b: b["y"])
+
+                        if len(m_probs) > 1:
+                            # If multiple, they are usually left and right. Sort all boards below by X.
+                            cands = [b for b in boards if b["y"] > tb["y0"]-50]
+                            cands.sort(key=lambda b: (b["y"], b["x"]))
+
+                        if len(cands) > i and problems[prob_num]["initial_image"] is None:
                             problems[prob_num]["initial_image"] = cands[i]["image"]
 
                 m_anses = list(answer_re.finditer(text))
@@ -179,12 +201,15 @@ class PDFExtractor:
                         prob_num = int(m_ans.group(1))
                         ans_title = m_ans.group(2)
                         if prob_num in problems:
-                            # Answers might also be grouped in one text block
-                            cands = [(b["y"]-tb["y0"], b) for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"]-tb["x0"]) < cv_img.shape[1]/2]
-                            if cands:
-                                b = sorted(cands, key=lambda c: c[0])[0][1]
-                                if b["is_full"]:
-                                    problems[prob_num]["answers"].append({"title": ans_title, "text": m_ans.group(0), "image": b["image"]})
+                            cands = [b for b in boards if b["y"] > tb["y0"]-50 and abs(b["x"] - tb["x0"]) < cv_img.shape[1]/3]
+                            cands.sort(key=lambda b: b["y"])
+
+                            if len(m_anses) > 1:
+                                cands = [b for b in boards if b["y"] > tb["y0"]-50]
+                                cands.sort(key=lambda b: (b["y"], b["x"]))
+
+                            if len(cands) > i and cands[i]["is_full"]:
+                                problems[prob_num]["answers"].append({"title": ans_title, "text": m_ans.group(0), "image": cands[i]["image"]})
 
         return problems
 
