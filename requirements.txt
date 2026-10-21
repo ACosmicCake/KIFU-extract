@@ -2,4 +2,3 @@ PyMuPDF
 opencv-python
 numpy
 pytesseract
-scikit-learn
